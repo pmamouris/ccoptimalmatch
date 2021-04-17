@@ -1,0 +1,294 @@
+---
+title: "Matching case-controls in *R* using the `ccoptimalmatch` package"
+author: "Pavlos Mamouris, Vahid Nassiri"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Matching case-controls in *R* using the `ccoptimalmatch` package}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+
+# The *R* Environment
+
+R software will be used throughout this vignette. The *R*
+statistical software is freely available and you may
+download and install it for Windows, Mac, and Linux systems from:
+<https://www.r-project.org>.
+
+*R* is a user-friendly platform. For example, you can type in the console:
+
+```{r}
+1 + 1
+```
+
+
+
+# Setup
+
+## Install the `ccoptimalmatch` package
+
+You can install the optccmatch package directly from R:
+
+```{r,eval=FALSE}
+install.packages("ccoptimalmatch")
+```
+
+## Load the `ccoptimalmatch` package
+
+After you install the `ccoptimalmatch` package, you can load it to use its functions using the library function: 
+Note that you have to load the *R* package that you need to use each time you start a new *R* session.
+
+```{r,eval=FALSE}
+library(ccoptimalmatch)
+```
+
+## Datasets
+<!--  To simply load the data --> 
+
+```{r, echo=FALSE}
+data(being_processed, package = "ccoptimalmatch")
+```
+
+We have two data-sets in this package, namely the "not_processed" and the "being_processed" data-set. The "not_processed" data-set, as the name reveals, is a raw data-set containing the cases, controls, patient_ID and other relevant variables. After different pre-processing steps, we end up to the "being_processed" data, which is the one to use in the algorithm.
+To see the first 6 rows of the "being_processed" data, enter:
+```{r}
+head(being_processed)
+```
+
+If you wish to investigate the data-set and its attributes, then use the help function:
+
+```{r, eval=FALSE}
+help("being_processed")
+```
+
+You can directly access a variable within this data frame as follows:
+```{r, eval=FALSE}
+being_processed$case_control
+```
+
+For example, let us tabulate this variable and investigate the number of cases and controls:
+
+```{r}
+table(being_processed$case_control)
+```
+"case_control" is a dummy variable indicating whether the patient
+is a case or a control. There are 202 cases and 10,462 available controls to pool. 
+
+
+
+# Prepare the dataset to be analyzed
+
+## Raw data
+To see the first 6 rows of the "not_processed" data:
+<!--  To simply load the data --> 
+
+```{r, echo=FALSE}
+data(not_processed, package = "ccoptimalmatch")
+```
+
+```{r}
+head(not_processed)
+```
+
+Let us tabulate the "case_control" variable and investigate the number of cases and controls in the "not_processed" data-set this time:
+
+```{r}
+table(not_processed$case_control)
+```
+You can observe that we have 202 cases and 45,817 available controls to pool. Controls might be duplicated since a control could appear up to 6 times, from 2010 until 2015. The unique controls to pool are 13,491.
+
+The following steps are necessary to pre-process the "not_processed" data-set in a format that can be used by our algorithm:
+
+## Step 1: Exact Matching on several variables
+```{r, echo=F, results='hide',message=FALSE}
+library(dplyr)
+```
+
+We start by defining the subsets. In order to define the subsets, we filter by the "cases", take the distinct combination of exact variables (Gender, JCG and Practice_Id), and create the new variable "subset". Finally, we select only 4 relevant variables (Gender, JCG, Practice_Id, subset): 
+```{r}
+create_subset <- not_processed %>% 
+                 filter(case_control =="case") %>%
+                 arrange(Practice_Id, Gender, JCG) %>%
+                 distinct(Gender, JCG, Practice_Id, .keep_all = TRUE) %>%
+                 mutate(subset = 1:n()) %>%
+                 select(Gender, JCG, Practice_Id, subset)
+```
+There were created n (=26) subsets, where a subset is defined as a factorial combination of the exact variables. For example, subset 1 contains females that visited practice 1 in year 2010, subset 2 contains females that visited practice 1 in year 2011, subset 3 contains females that visited practice 1 in year 2012 up to subset n, which is the last factorial combination of the exact variables:
+```{r}
+head(create_subset)
+```
+We merge the data that contains the "subset" variable with the data that contains the cases only:
+```{r}
+case_with_subset <- not_processed %>% 
+                          filter(case_control =="case") %>%
+                           full_join(create_subset, by = c("Gender", "JCG", "Practice_Id"))
+```
+
+We merge the data that contains the "subset" variable with the data that contains the controls only:
+```{r}
+control_with_subset <- not_processed %>% 
+                             filter(case_control =="control") %>%
+                             right_join(create_subset, by = c("Gender", "JCG", "Practice_Id"))
+```
+
+Finally we bind the cases and the controls, which will have now the new variable "subset":
+```{r}
+not_processed <- rbind(case_with_subset,control_with_subset)
+```
+
+
+Let us tabulate the "case_control" variable again:
+```{r}
+table(not_processed$case_control)
+```
+As we observe, the number of controls have decreased to 36,518 and the unique controls to 12,643.
+The gain from exact matching is that by shifting the analysis from one big data-set to several small sub-sets, the computational burden decreases substantially. There were 13,491-12,643 = 848 controls that couldn't be matched to any of the cases, thus are excluded. 
+
+## Step 2: Create artificial observations and select the range of variables
+
+Firstly, we split the data-set in cases and controls and create a variable "cluster_case" to depict the cases separately. The "cluster_case" variable will have as many levels as the total number of cases, i.e. 202 in our example. For that purpose, the "cluster_case" will be empty in the controls data-set but have the names of the cases in the cases data-set:
+```{r}
+bdd_controls <- not_processed[not_processed$case_control=="control",]
+bdd_controls$cluster_case <- 0
+bdd_cases <- not_processed[not_processed$case_control=="case",]
+bdd_cases$cluster_case <- paste("case",1:nrow(bdd_cases),sep = "_")
+```
+
+Next, we bind the cases and the controls, which will have now the new variable "cluster_case" and create the variable age:
+```{r}
+not_processed <- rbind(bdd_cases,bdd_controls)
+not_processed$age <- not_processed$JCG-not_processed$Birth_Year 
+```
+
+```{r, echo=F, results='hide',message=FALSE}
+not_processed <- as.data.frame(not_processed)
+```
+
+After creating the variable "cluster_case", we split again the cases and controls into two different data-sets:
+```{r}
+bdd_cases <- not_processed[not_processed$case_control=="case",]
+bdd_control <- not_processed[not_processed$case_control=="control",]
+```
+Next, we create an empty data-frame and a unique list of the variable "cluster_case":
+```{r}
+bdd_temp <- data.frame()
+list_p <- unique(bdd_cases$cluster_case)
+```
+
+Below it is the loop to generate the pseudo-observations for controls, which will be explained in details. We start by identifying in which subset each case belongs. Next, we check which controls are in the same subset and bind those controls to the case. For example, subset 1 has 2 cases and 1,523 controls. By creating pseudo-observations for controls, subset 1 will have 2 cases and 3,046 controls. Finally, we select the range for the age and follow-up. For demonstration purposes, we decided that an absolute difference of age smaller than 2 is acceptable and that the follow-up time between cases and controls is exact.  Since the 2 cases are different in subset 1 in terms of age and follow-up, each case will end up with a different number of controls available to pool:
+```{r}
+for(i in 1:length(list_p)){
+ temp <- bdd_cases[bdd_cases$cluster_case==list_p[i],]
+ subset_identified <- temp$subset
+ temp0 <- bdd_control[bdd_control$subset==temp$subset,]
+ temp_final <- rbind(temp,temp0)
+ temp_final$cluster_case <- list_p[i]
+ temp_final=temp_final %>%
+            group_by(cluster_case) %>%
+            mutate(age_diff = abs(age - age[case_control=="case"]),
+            fup_diff = foll_up - foll_up[case_control=="case"])
+ temp_final$age_fup <- ifelse(temp_final$age_diff<=2&temp_final$fup_diff==0,"accept","delete")
+ temp_final <- temp_final[temp_final$age_fup=="accept",]
+ temp_final$age_fup <- NULL
+ bdd_temp <- rbind(bdd_temp,temp_final)
+}
+```
+
+Let us tabulate the "case_control" variable again:
+```{r}
+table(bdd_temp$case_control)
+```
+The number of duplicated controls have decreased to 202 and the unique controls to identify are 10,462. Now, all the remaining controls are those that have at most 2 years difference from the case in the same subset, and also have the exact follow up.
+
+
+
+## Step 3: Create the variables "total controls per case" and "frequency of controls"
+We create the variable "total controls per case", which depicts the total pool of controls available for each case. We also create the variable "case_ind" which takes the value 1 if the patient is a case and 0 if the patient is a control. Lastly, we select only relevant variables:
+```{r}
+bdd_temp = bdd_temp %>% group_by(cluster_case) %>% mutate(total_control_per_case = n()-1)
+bdd_temp$case_ind <- ifelse(bdd_temp$case_control=="case",1,0)
+bdd_temp <- subset(bdd_temp, select=c(cluster_case, Patient_Id, case_control, case_ind,
+                      JCG, entry_year, CI, age_diff, fup_diff, total_control_per_case))
+```
+
+The variable "frequency of controls" depicts how many times a control is assigned to a case:
+```{r}
+bdd_temp = bdd_temp %>% group_by(Patient_Id) %>% mutate(freq_of_controls = n())
+```
+
+Let us have a glimpse of the data by looking at the 10 first rows:
+```{r, echo=F, results='hide',message=FALSE}
+bdd_temp <- as.data.frame(bdd_temp)
+```
+
+```{r}
+head(bdd_temp, 10)
+```
+Some first conclusions can be drawn:
+
+
+1. For the controls, look at control "Patient_13330". His/her frequency is 3, indicating that he/she is available for 3 cases and also that appears in the data-set 3 times. This is important because the controls with the lowest frequency will be matched first, thus leaving the controls with highest  frequency available for the next cases.
+2. We observe that the ordering is not the most optimal yet since the controls are not as close as they should be to the cases in terms of "age-difference" and "frequency of controls", which brings us to the next step.
+
+## Step 4: Order variables
+Ordering the variables in a correct order is of utter importance. For simplicity, assuming that there are three variables, namely ”age-difference”, ”follow-up difference” and ”frequency of controls”. The data-set  should be ordered by the variables ”case”, ”control”, ”follow-up difference”, ”age-difference”  and lastly  by ”frequency of controls”. The variable ”follow-up difference” appears before ”age-difference” since the ”follow-up difference” has more weight (importance) than the ”age-difference”.
+```{r}
+bdd_temp<-bdd_temp[order(bdd_temp$cluster_case,bdd_temp$case_control,bdd_temp$fup_diff,
+                         bdd_temp$age_diff,bdd_temp$freq_of_controls),]
+```
+
+By checking the 10 first rows, we can see that the closest controls are ordered after the case, indicating that they are optimal (have the same age-difference). Also, we observe that the "frequency of controls" is ordered which allows the control with the lowest frequency to be matched first:
+```{r}
+head(bdd_temp, 10)
+```
+
+# Analysis of the data
+
+We have the data ready to be used for the algorithm. The "optimal_matching" function generates an optimal match between cases and controls in an iterative and computational efficient way. For demonstration purposes, we select 4 controls to match, and we perform the analysis without replacement:
+```{r, echo=F, results='hide',message=FALSE}
+library(ccoptimalmatch)
+```
+```{r}
+final_data <- optimal_matching(bdd_temp, n_con=4, cluster_case, Patient_Id, 
+                               total_control_per_case, case_control, with_replacement = FALSE)
+```
+```{r, echo=F, results='hide',message=FALSE}
+final_data <- as.data.frame(final_data)
+```
+Below we summarise the steps that explain how the algorithm works.
+
+1. Start of round 1. Select one control per case per iteration. We select the first control which is the closest, thus the most optimal.
+2. Split between duplicated and unique controls, and assign the duplicated controls to the case that has less available controls to pool.
+3. Exclude cases that already have at least 1 control. Also exclude controls that are matched to a case.
+4. Repeat steps 1-3 until all cases have at least 1 control (where applicable).
+5. End of round 1. Continue to round 2 up to round n, where n is the controls that the user wants to match. If 4 controls are needed, then we have 4 rounds, if 10 controls are needed we have 10 rounds.
+
+
+
+We can see the first 20 rows:
+```{r}
+final_data <- final_data %>% arrange(cluster_case)
+head(final_data,20)
+```
+
+If we want to see how many controls are matched for each case, then:
+```{r}
+final_data = final_data %>% group_by(cluster_case) %>% mutate(total_control_matched = n()-1)
+table(final_data$case_control,final_data$total_control_matched)
+```
+16 cases have only 1 control, 9 cases have 2 controls, 6 cases have 3 controls and finally 161 cases have 4 controls, using the criteria above.
+
+# Extensions and Summary
+
+In the clinical case described in the previous sections, we used 3 exact variables (Gender, JCG, Practice_Id), age and follow-up. This algorithm is very flexible in accommodating even more continuous and exact variables, and as a matter of fact, the more criteria are added, the less the computational burden is. It is very useful to operate different scenarios of matching by adjusting the age range, the follow-up time and the Comorbidity Index. 
+
+The user (epidemiologist, researcher) has available a 1:n case-control matching algorithm in an optimal, efficient, and fast way using a multi-step (iterative) procedure for traditional and nested case-control studies.
+
